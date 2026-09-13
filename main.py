@@ -44,6 +44,456 @@ E_ROCKET = "\U0001F680"
 E_ID     = "\U0001F194"
 E_GLOBE  = "\U0001F30D"
 E_DEVIL  = "\U0001F608"
+E_WARN   = "\u26A0\uFE0F"
+E_MAIL   = "\U0001F4E9"
+E_LINE   = "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
+
+# ================= CONFIG =================
+BOT_TOKEN = "8801453801:AAGLPbGF2-BvWMJ3E7K2sHeTMQPXZDRFHXU"
+OWNER_ID = 6863389453
+OWNER_USERNAME = "@CURRENTTTTTTTT"
+UPI_ID = "adityagupta0018@axl"
+UPI_NAME = "Store Owner"
+SUPPORT_LINK = "https://t.me/CURRENTTTTTTTT"
+FORCE_CHANNELS = ["@CURRENTTTTTTTT", "@newchannel1109"]
+FORCE_LINKS = {
+    "@CURRENTTTTTTTT": "https://t.me/CURRENTTTTTTTT",
+    "@newchannel1109": "https://t.me/newchannel1109",
+}
+REFER_BONUS = 0.25
+DB_FILE = "store.db"
+# ==========================================
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+PLANS = {
+    "p15":  {"name": "15 Days",  "price": 70,  "days": 15,  "emoji": E_FIRE, "color": E_GREEN},
+    "p30":  {"name": "30 Days",  "price": 120, "days": 30,  "emoji": E_BOLT, "color": E_BLUE},
+    "p60":  {"name": "60 Days",  "price": 250, "days": 60,  "emoji": E_GEM,  "color": E_PURPLE},
+    "p120": {"name": "120 Days", "price": 450, "days": 120, "emoji": E_CROWN,"color": E_YELLOW},
+}
+
+# ================= FAKE UTR =================
+FAKE_PATTERNS = [
+    "111111111111", "222222222222", "333333333333", "444444444444",
+    "555555555555", "666666666666", "777777777777", "888888888888",
+    "999999999999", "000000000000",
+    "123456789012", "123456789123", "1234567890123",
+    "987654321098", "987654321987",
+]
+
+def is_fake_utr(utr):
+    if utr in FAKE_PATTERNS:
+        return True, "Known fake pattern"
+    if len(set(utr)) == 1:
+        return True, "Sabhi digits same"
+    if len(set(utr)) <= 2 and len(utr) >= 8:
+        return True, "Sirf 1-2 digits repeat"
+    seq_asc = "0123456789012345678901234"
+    seq_desc = seq_asc[::-1]
+    if utr in seq_asc or utr in seq_desc:
+        return True, "Sequence pattern"
+    digits = [int(d) for d in utr]
+    if all(d % 2 == 0 for d in digits):
+        return True, "Sabhi digits even"
+    if all(d % 2 == 1 for d in digits):
+        return True, "Sabhi digits odd"
+    if len(utr) >= 6:
+        for size in range(2, len(utr) // 2 + 1):
+            if len(utr) % size == 0:
+                sub = utr[:size]
+                if sub * (len(utr) // size) == utr:
+                    return True, "Repeated pattern"
+    if len(utr) >= 6:
+        is_seq = True
+        for i in range(1, len(utr)):
+            if int(utr[i]) != (int(utr[i-1]) + 1) % 10:
+                is_seq = False
+                break
+        if is_seq:
+            return True, "Increasing sequence"
+    if len(utr) >= 6:
+        is_seq = True
+        for i in range(1, len(utr)):
+            if int(utr[i]) != (int(utr[i-1]) - 1) % 10:
+                is_seq = False
+                break
+        if is_seq:
+            return True, "Decreasing sequence"
+    return False, ""
+
+# ================= DATABASE =================
+def db_init():
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT,
+        balance REAL DEFAULT 0, banned INTEGER DEFAULT 0,
+        referred_by INTEGER DEFAULT 0, joined_at TEXT,
+        last_seen TEXT, active_until TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, plan_key TEXT,
+        plan_name TEXT, amount INTEGER, days INTEGER, utr TEXT, status TEXT,
+        created_at TEXT, verified_at TEXT, ff_uid TEXT, region TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS utrs (
+        utr TEXT PRIMARY KEY, user_id INTEGER, order_id INTEGER, created_at TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS referrals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        referrer_id INTEGER, referred_id INTEGER,
+        created_at TEXT, UNIQUE(referred_id))""")
+    c.execute("PRAGMA table_info(orders)")
+    cols = [r[1] for r in c.fetchall()]
+    if "ff_uid" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN ff_uid TEXT")
+    if "region" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN region TEXT")
+    con.commit(); con.close()
+    print("[OK] Database ready")
+
+def db_add_user(uid, uname, fname, ref_by=0):
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, referred_by, joined_at, last_seen) VALUES (?,?,?,?,?,?)",
+              (uid, uname, fname, ref_by, datetime.now().isoformat(), datetime.now().isoformat()))
+    c.execute("UPDATE users SET username=?, first_name=?, last_seen=? WHERE user_id=?",
+              (uname, fname, datetime.now().isoformat(), uid))
+    con.commit(); con.close()
+
+def db_is_new(uid):
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("SELECT * FROM users WHERE user_id=?", (uid,))
+    row = c.fetchone(); con.close()
+    return row is None
+
+def db_is_banned(uid):
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("SELECT banned FROM users WHERE user_id=?", (uid,))
+    row = c.fetchone(); con.close()
+    return row and row[0] == 1
+
+def db_ban(uid, val):
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("UPDATE users SET banned=? WHERE user_id=?", (val, uid))
+    con.commit(); con.close()
+
+def db_add_balance(uid, amt):
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amt, uid))
+    con.commit(); con.close()
+
+def db_get_user(uid):
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("SELECT * FROM users WHERE user_id=?", (uid,))
+    row = c.fetchone(); con.close()
+    return row
+
+def db_create_order(uid, key, plan, utr, ff_uid, region):
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("""INSERT INTO orders (user_id, plan_key, plan_name, amount, days, utr, status, created_at, ff_uid, region)
+        VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (uid, key, plan["name"], plan["price"], plan["days"], utr, "pending",
+         datetime.now().isoformat(), ff_uid, region))
+    oid = c.lastrowid; con.commit(); con.close()
+    return oid
+
+def db_update_order(oid, status):
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("UPDATE orders SET status=?, verified_at=? WHERE id=?",
+              (status, datetime.now().isoformat(), oid))
+    con.commit(); con.close()
+
+def db_get_order(oid):
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("SELECT * FROM orders WHERE id=?", (oid,))
+    row = c.fetchone(); con.close()
+    return row
+
+def db_user_orders(uid, limit=10):
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("SELECT * FROM orders WHERE user_id=? ORDER BY id DESC LIMIT ?", (uid, limit))
+    rows = c.fetchall(); con.close()
+    return rows
+
+def db_pending_orders():
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("SELECT * FROM orders WHERE status='pending' ORDER BY id DESC")
+    rows = c.fetchall(); con.close()
+    return rows
+
+def db_stats():
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("SELECT COUNT(*) FROM users"); users = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM users WHERE banned=0"); active_users = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM orders"); total = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM orders WHERE status='verified'"); verified = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM orders WHERE status='pending'"); pending = c.fetchone()[0]
+    c.execute("SELECT SUM(amount) FROM orders WHERE status='verified'"); revenue = c.fetchone()[0] or 0
+    today = datetime.now().strftime("%Y-%m-%d")
+    c.execute("SELECT COUNT(*) FROM users WHERE joined_at LIKE ?", (today + "%",))
+    today_users = c.fetchone()[0]
+    now = datetime.now().isoformat()
+    c.execute("SELECT COUNT(*) FROM users WHERE active_until > ?", (now,))
+    active_subs = c.fetchone()[0]
+    yesterday = (datetime.now() - timedelta(days=1)).isoformat()
+    c.execute("SELECT COUNT(*) FROM users WHERE last_seen > ?", (yesterday,))
+    online_24h = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM orders WHERE created_at LIKE ?", (today + "%",))
+    today_orders = c.fetchone()[0]
+    con.close()
+    return {"users": users, "active_users": active_users, "total": total,
+            "verified": verified, "pending": pending, "revenue": revenue,
+            "today_users": today_users, "active_subs": active_subs,
+            "online_24h": online_24h, "today_orders": today_orders}
+
+def db_all_users():
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("SELECT user_id FROM users WHERE banned=0")
+    rows = [r[0] for r in c.fetchall()]; con.close()
+    return rows
+
+def db_utr_used(utr):
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("SELECT * FROM utrs WHERE utr=?", (utr,))
+    row = c.fetchone(); con.close()
+    return row is not None
+
+def db_save_utr(utr, uid, oid):
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("INSERT OR IGNORE INTO utrs (utr, user_id, order_id, created_at) VALUES (?,?,?,?)",
+              (utr, uid, oid, datetime.now().isoformat()))
+    con.commit(); con.close()
+
+def db_refer_count(uid):
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (uid,))
+    count = c.fetchone()[0]; con.close()
+    return count
+
+def db_today_orders():
+    today = datetime.now().strftime("%Y-%m-%d")
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    c.execute("SELECT * FROM orders WHERE created_at LIKE ? ORDER BY id DESC", (today + "%",))
+    rows = c.fetchall(); con.close()
+    return rows
+
+def db_save_referral(referrer_id, referred_id):
+    con = sqlite3.connect(DB_FILE); c = con.cursor()
+    try:
+        c.execute("INSERT INTO referrals (referrer_id, referred_id, created_at) VALUES (?,?,?)",
+                  (referrer_id, referred_id, datetime.now().isoformat()))
+        con.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        con.close()
+
+def fmt_bal(v):
+    if v is None: return "0"
+    if v == int(v): return str(int(v))
+    return f"{v:.2f}".rstrip('0').rstrip('.')
+
+def fmt_order(r):
+    return (tuple(r) + ("",) * 12)[:12]
+
+# ================= FORCE JOIN =================
+async def is_joined(user_id, ctx):
+    for ch in FORCE_CHANNELS:
+        try:
+            member = await ctx.bot.get_chat_member(ch, user_id)
+            if member.status not in ("member", "administrator", "creator"):
+                return False
+        except Exception as e:
+            logger.warning(f"Force join check failed for {ch}: {e}")
+    return True
+
+async def force_join_msg(u, ctx):
+    kb = []
+    for ch in FORCE_CHANNELS:
+        kb.append([InlineKeyboardButton(f"{E_JOIN}  Join {ch}", url=FORCE_LINKS[ch])])
+    kb.append([InlineKeyboardButton(f"{E_CHECK}  Joined, Try Again", callback_data="check_join")])
+    channels_list = "\n".join([f"{E_ROCKET} {ch}" for ch in FORCE_CHANNELS])
+    text = (
+        f"╔══════════════════════╗\n"
+        f"   {E_WARN}  *JOIN REQUIRED*  {E_WARN}\n"
+        f"╚══════════════════════╝\n\n"
+        f"Pehle ye channels join karo:\n"
+        f"{channels_list}\n\n"
+        f"{E_CHECK}  Join ke baad *JOINED* dabao"
+    )
+    markup = InlineKeyboardMarkup(kb)
+    if hasattr(u, "message") and u.message:
+        await u.message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        await u.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+
+# ================= EDIT HELPER =================
+async def smart_edit(q, text, kb):
+    try:
+        await q.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+    except Exception:
+        try:
+            await q.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
+            try:
+                await q.message.delete()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"smart_edit failed: {e}")
+
+# ================= DEVIL QR =================
+def make_stylish_qr_url(upi_link):
+    encoded = urllib.parse.quote(upi_link, safe='')
+    return (
+        f"https://api.qrserver.com/v1/create-qr-code/"
+        f"?size=700x700&data={encoded}&color=000000&bgcolor=8B0000&qzone=3&format=png"
+    )
+
+# ================= KEYBOARDS =================
+def home_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{E_FIRE}  Buy AutoLike  {E_FIRE}", callback_data="buylike")],
+        [InlineKeyboardButton(f"{E_BOX}  My Orders", callback_data="myorders"),
+         InlineKeyboardButton(f"{E_USER}  Profile", callback_data="profile")],
+        [InlineKeyboardButton(f"{E_MONEY}  Wallet", callback_data="wallet"),
+         InlineKeyboardButton(f"{E_GIFT}  Refer & Earn", callback_data="refer")],
+        [InlineKeyboardButton(f"{E_TROPHY}  Leaderboard", callback_data="leaderboard"),
+         InlineKeyboardButton(f"{E_CHART}  Stats", callback_data="bot_stats")],
+        [InlineKeyboardButton(f"{E_PHONE}  Support", url=SUPPORT_LINK),
+         InlineKeyboardButton(f"{E_INFO}  About", callback_data="about")],
+        [InlineKeyboardButton(f"{E_HELP}  Help", callback_data="help")]
+    ])
+
+def plans_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{E_GREEN}  {E_FIRE}  15 Days   -   Rs.70", callback_data="select_p15")],
+        [InlineKeyboardButton(f"{E_BLUE}  {E_BOLT}  30 Days   -   Rs.120", callback_data="select_p30")],
+        [InlineKeyboardButton(f"{E_PURPLE}  {E_GEM}  60 Days   -   Rs.250", callback_data="select_p60")],
+        [InlineKeyboardButton(f"{E_YELLOW}  {E_CROWN}  120 Days  -   Rs.450", callback_data="select_p120")],
+        [InlineKeyboardButton(f"{E_BACK}  Back", callback_data="back_home")]
+    ])
+
+def region_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🇮🇳   I N D I A", callback_data="region_India")],
+        [InlineKeyboardButton("🇧🇩   B A N G L A D E S H", callback_data="region_Bangladesh")],
+        [InlineKeyboardButton("🇵🇰   P A K I S T A N", callback_data="region_Pakistan")],
+        [InlineKeyboardButton("🇮🇩   I N D O N E S I A", callback_data="region_Indonesia")],
+        [InlineKeyboardButton("🌍   M I D D L E   E A S T", callback_data="region_Middle East")],
+        [InlineKeyboardButton("🌐   O T H E R", callback_data="region_Other")],
+        [InlineKeyboardButton(f"{E_BACK}  B A C K", callback_data="buylike")]
+    ])
+
+def admin_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{E_CHART}  Stats", callback_data="admin_stats"),
+         InlineKeyboardButton(f"{E_HOUR}  Pending", callback_data="admin_pending")],
+        [InlineKeyboardButton(f"{E_JOIN}  Broadcast Guide", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(f"{E_CROSS}  Users List", callback_data="admin_users")],
+        [InlineKeyboardButton(f"{E_BACK}  Close", callback_data="back_home")]
+    ])
+
+# ================= COMMANDS SETUP =================
+async def setup_commands(app):
+    member_cmds = [
+        BotCommand("start",       "Start the bot"),
+        BotCommand("buy",         "Buy AutoLike"),
+        BotCommand("myorders",    "My Orders"),
+        BotCommand("profile",     "My Profile"),
+        BotCommand("wallet",      "My Wallet"),
+        BotCommand("refer",       "Refer and Earn"),
+        BotCommand("leaderboard", "Leaderboard"),
+        BotCommand("support",     "Support"),
+        BotCommand("help",        "Help"),
+    ]
+    owner_cmds = member_cmds + [
+        BotCommand("admin",      "Admin Panel"),
+        BotCommand("stats",      "Statistics"),
+        BotCommand("pending",    "Pending Orders"),
+        BotCommand("todayorders","Today Orders"),
+        BotCommand("search",     "Search by UTR"),
+        BotCommand("adduser",    "Add AutoLike Direct"),
+        BotCommand("dm",         "DM any user"),
+        BotCommand("broadcast",  "Broadcast Message"),
+        BotCommand("verify",     "Verify Order"),
+        BotCommand("reject",     "Reject Order"),
+        BotCommand("user",       "User Info"),
+        BotCommand("ban",        "Ban User"),
+        BotCommand("unban",      "Unban User"),
+        BotCommand("addbalance", "Add Balance"),
+        BotCommand("myid",       "Check My ID"),
+    ]
+    await app.bot.set_my_commands(member_cmds, scope=BotCommandScopeDefault())
+    try:
+        await app.bot.set_my_commands(owner_cmds, scope=BotCommandScopeChat(chat_id=OWNER_ID))
+    except Exception as e:
+        logger.warning(f"Owner commands set failed: {e}")
+    print("[OK] Commands set")
+
+# ================= MEMBER COMMANDS =================
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    ref_by = 0
+    if ctx.args and ctx.args[0].startswith("ref_"):
+        try:
+            ref_by = int(ctx.args[0].split("_")[1])
+            if ref_by == u.id: 
+                ref_by = 0
+        except (ValueError, IndexError):
+            pass
+    
+    if db_is_new(u.id):
+        db_add_user(u.id, u.username or "", u.first_name or "", ref_by)
+        if ref_by and not db_is_new(ref_by):
+            ref_row = db_get_user(ref_by)
+            if ref_row and ref_row[4] == 0:
+                if db_save_referral(ref_by, u.id):
+                    db_add_balance(ref_by, REFER_BONUS)
+                    try:
+                        await ctx.bot.send_message(ref_by,
+                            f"{E_GIFT}  *New Referral!*\n\n"
+                            f"{E_USER}  *{u.first_name}* ne tera link use kiya.\n"
+                            f"{E_MONEY}  *Rs.{fmt_bal(REFER_BONUS)} added!*",
+                            parse_mode="Markdown")
+                    except Exception:
+                        pass
+    else:
+        db_add_user(u.id, u.username or "", u.first_name or "")
+    
+    if db_is_banned(u.id):
+        await update.message.reply_text(f"{E_CROSS}  Aapko ban kiya gaya hai.", parse_mode="Markdown")
+        return
+    if not await is_joined(u.id, ctx):
+        await force_join_msg(update, ctx); return
+    s = db_stats()
+    await update.message.reply_text(
+        f"╔══════════════════════╗\n"
+        f"   {E_WAVE}  *Welcome {u.first_name}!*\n"
+        f"╚══════════════════════╝\n\n"
+        f"{E_GAME}  *FF AUTOLIKE STORE*\n\n"
+        f"{E_HEART}  200 Likes Daily Given\n"
+        f"{E_BOLT}  Instant Auto-Verify\n"
+        f"{E_SHIELD}  100% Safe & Trusted\n"
+        f"{E_GEM}  Premium Quality Service\n\n"
+        f"{E_LINE}\n"
+        f"{E_USER}  Total Users: *{s['users']}*\n"
+        f"{E_CHECK}  Total Orders: *{s['verified']}*\n"
+        f"{E_LINE}\n\n"
+        f"👇  *Niche se option choose karo*",
+        reply_markup=home_kb(),
+        parse_mode="Markdown"
+    )
+
+async def cmd_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await is_joined(updatE_HEART  = "\u2764\uFE0F"
+E_SHIELD = "\U0001F6E1\uFE0F"
+E_WAVE   = "\U0001F44B"
+E_GAME   = "\U0001F3AE"
+E_JOIN   = "\U0001F4E2"
+E_BACK   = "\U0001F519"
+E_ROCKET = "\U0001F680"
+E_ID     = "\U0001F194"
+E_GLOBE  = "\U0001F30D"
+E_DEVIL  = "\U0001F608"
 E_LINE   = "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
 
 # ================= CONFIG =================
